@@ -93,5 +93,5 @@ https://github.com/Futureppo/astrbot_plugin_custom_menu/
 
 ## 开源地址
 
-https://github.com/cuman/astrbot_plugin_image_replay
+https://github.com/cumany/astrbot_plugin_image_replay
 
