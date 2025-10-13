@@ -1,7 +1,8 @@
 # AstrBot 图片回复插件 (image_replay)
 
 一个支持自定义表情、图片管理与批量发送的 AstrBot 插件，解决表情制作与管理困难的问题。
-
+此插件是根据menu插件改进而来
+https://github.com/Futureppo/astrbot_plugin_custom_menu/
 ## 功能特点
 
 - 支持关键词触发图片回复
@@ -93,3 +94,4 @@
 ## 开源地址
 
 https://github.com/cuman/astrbot_plugin_image_replay
+
