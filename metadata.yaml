@@ -1,0 +1,9 @@
+id: image_replay
+name: Image Replay
+author: cuman
+version: "1.0.0"
+homepage: https://github.com/cuman/astrbot_plugin_image_replay
+desc: 支持自定义表情，图片，随机，批量发送。解决表情制作困难的问题。
+tags:
+  - image
+  - automation

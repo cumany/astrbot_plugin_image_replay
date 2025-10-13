@@ -1,0 +1,71 @@
+{
+  "require_wake": {
+    "description": "是否仅在命令前缀/唤醒触发后响应，默认开启以避免干扰其他插件。",
+    "type": "bool",
+    "default": true
+  },
+  "case_sensitive": {
+    "description": "匹配指令时是否区分大小写。",
+    "type": "bool",
+    "default": false
+  },
+  "commands": {
+    "description": "指令到图片前缀的映射列表，命中后仅搜索对应前缀的图片。",
+    "type": "list",
+    "default": [],
+    "items": {
+      "type": "object",
+      "items": {
+        "command": {
+          "description": "收到的指令，例如 功能。",
+          "type": "string"
+        },
+        "prefix": {
+          "description": "图片前缀，与文件命名的前缀部分对应。",
+          "type": "string"
+        }
+      }
+    }
+  },
+  "multi_reply_mode": {
+    "description": "当匹配到多张图片时的处理方式：random 随机一张，all 全部发送。",
+    "type": "string",
+    "default": "random",
+    "options": [
+      "random",
+      "all"
+    ]
+  },
+  "group_whitelist": {
+    "description": "允许响应的群号列表，留空表示全部。",
+    "type": "list",
+    "items": {
+      "type": "string"
+    },
+    "default": []
+  },
+  "group_blacklist": {
+    "description": "禁止响应的群号列表。",
+    "type": "list",
+    "items": {
+      "type": "string"
+    },
+    "default": []
+  },
+  "user_whitelist": {
+    "description": "允许响应的用户 ID 列表，留空表示全部。",
+    "type": "list",
+    "items": {
+      "type": "string"
+    },
+    "default": []
+  },
+  "user_blacklist": {
+    "description": "禁止响应的用户 ID 列表。",
+    "type": "list",
+    "items": {
+      "type": "string"
+    },
+    "default": []
+  }
+}
