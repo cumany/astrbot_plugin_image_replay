@@ -1,11 +1,12 @@
 from __future__ import annotations
 
+import asyncio
 import base64
 import imghdr
 import json
 import random
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Mapping, Optional, Set, Tuple
+from typing import Any, Iterable, List, Mapping, Optional, Set, Tuple
 from urllib.parse import urlparse
 
 import aiohttp
@@ -48,7 +49,7 @@ class ImageReplayPlugin(Star):
                 return
 
             logger.debug(f"Received message: {message}")
-            raw_commands = self.config.get("commands", []) if hasattr(self.config, "get") else []
+            raw_commands = self.config.get("commands", [])
             # 精确匹配：检查关键字是否等于消息字符串的第一个单词
             keyword = next(
                 (k for k in raw_commands if k == message.split()[0]), None
@@ -107,23 +108,12 @@ class ImageReplayPlugin(Star):
            return
         try:
             message = (event.message_str or "").strip()
-            # 先判断命令类型再进行单次替换
-            for cmd in ["收集", "添加图片", "添加表情"]:
-                if message.startswith(cmd):
-                    prefix = message.replace(cmd, "", 1).strip()
-                    break
-            else:
-                prefix = "临时"  # 默认值
-            prefix = self._normalize_collect_prefix(prefix)
+            _, args = self._split_command_args(message)
+            prefix = self._normalize_collect_prefix(args or "临时")
 
             # 将前缀加入指令列表并保存到配置（首选通过框架配置）
-            try:
-                current = self.config.get("commands", []) if hasattr(self.config, "get") else getattr(self.config, "commands", []) or []
-            except Exception:
-                current = []
-            if not isinstance(current, list):
-                current = list(current)
-            if prefix not in current:
+            current = self.config.get("commands",[])
+            if prefix and prefix not in current:
                 current.append(prefix)
             self.config["commands"] = current  # type: ignore[index]
             save_fn = getattr(self.config, "save_config", None)
@@ -160,14 +150,8 @@ class ImageReplayPlugin(Star):
             if not text:
                 yield event.plain_result("请提供关键词，例如：删除图片指令 可爱表情 或 删除图片指令 可爱表情 ALL")
                 return
-            parts = text.replace("删除图片指令", "", 1).strip().split()
-            # 移除命令前缀（包括主命令和别名）
-            for cmd in ["删除图片指令", "删除图片"]:
-                if text.startswith(cmd):
-                    text = text.replace(cmd, "", 1).strip()
-                    break
-            
-            parts = text.split()
+            _, args = self._split_command_args(text)
+            parts = args.split()
             if not parts:
                 yield event.plain_result("请提供关键词，例如：删除图片指令 可爱表情")
                 return
@@ -238,7 +222,7 @@ class ImageReplayPlugin(Star):
     def _select_images(self, images: List[Path]) -> List[Path]:
         if not images:
             return []
-        multi_mode = self.config.get("multi_reply_mode", "random") if hasattr(self.config, "get") else "random"
+        multi_mode = self.config.get("multi_reply_mode", "random")
         if multi_mode == "all" or len(images) == 1:
             return images
         # 使用 random.sample 明确从列表中随机取一项
@@ -295,7 +279,8 @@ class ImageReplayPlugin(Star):
                 continue
             data = await self._load_image_source(src)
             if data:
-                return data, self._derive_image_extension(data, src)
+                extension = await self._derive_image_extension(data, src)
+                return data, extension
         return None
 
     async def _load_image_source(self, src: str) -> Optional[bytes]:
@@ -319,21 +304,20 @@ class ImageReplayPlugin(Star):
             return None
 
     async def _download_image(self, url: str) -> Optional[bytes]:
-        normalized = url.replace("https://", "http://", 1) if url.startswith("https://") else url
         try:
             async with aiohttp.ClientSession() as session:
-                async with session.get(normalized) as resp:
+                async with session.get(url) as resp:
                     resp.raise_for_status()
                     return await resp.read()
         except Exception as exc:
             logger.error(f"图片下载失败: {exc}")
             return None
 
-    def _derive_image_extension(self, data: bytes, src: Optional[str]) -> str:
+    async def _derive_image_extension(self, data: bytes, src: Optional[str]) -> str:
         suffix = self._suffix_from_source(src) if src else None
         if suffix:
             return suffix
-        detected = imghdr.what(None, data)
+        detected = await asyncio.to_thread(imghdr.what, None, data)
         if detected:
             if detected == "jpeg":
                 detected = "jpg"
@@ -391,10 +375,7 @@ class ImageReplayPlugin(Star):
                 break
         if has_any:
             return
-        try:
-            current = self.config.get("commands", []) if hasattr(self.config, "get") else getattr(self.config, "commands", []) or []
-        except Exception:
-            current = []
+        current = self.config.get("commands",[])
         if prefix in current:
             current = [c for c in current if c != prefix]
             self.config["commands"] = current  # type: ignore[index]
@@ -402,7 +383,6 @@ class ImageReplayPlugin(Star):
             if callable(save_fn):
                 save_fn()
             return
-            
 
 
     def _prepare_image_response(
@@ -447,7 +427,8 @@ class ImageReplayPlugin(Star):
     def _passes_message_guards(
         self, event: AstrMessageEvent, *, log_on_skip: bool = False
     ) -> bool:
-        require_wake = getattr(self.config, "require_wake", True)
+        require_wake =self.config.get("require_wake", True)
+        
         if require_wake and not getattr(event, "is_at_or_wake_command", False):
             if log_on_skip:
                 logger.debug("Not a wake command, skipping.")
@@ -459,10 +440,10 @@ class ImageReplayPlugin(Star):
     def _is_allowed(self, event: AstrMessageEvent) -> bool:
         group_id = event.get_group_id() or ""
         user_id = str(event.get_sender_id() or "")
-        group_whitelist = self.config.get("group_whitelist", []) if hasattr(self.config, "get") else []
-        group_blacklist = self.config.get("group_blacklist", []) if hasattr(self.config, "get") else []
-        user_whitelist = self.config.get("user_whitelist", []) if hasattr(self.config, "get") else []
-        user_blacklist = self.config.get("user_blacklist", []) if hasattr(self.config, "get") else []
+        group_whitelist = self.config.get("group_whitelist",[])
+        group_blacklist = self.config.get("group_blacklist",[])
+        user_whitelist = self.config.get("user_whitelist",[])
+        user_blacklist = self.config.get("user_blacklist",[])
         if group_whitelist and group_id not in group_whitelist:
             return False
         if group_blacklist and group_id and group_id in group_blacklist:
@@ -474,3 +455,14 @@ class ImageReplayPlugin(Star):
             return False
 
         return True
+
+
+
+    def _split_command_args(self, message: str) -> Tuple[str, str]:
+        trimmed = (message or "").strip()
+        if not trimmed:
+            return "", ""
+        parts = trimmed.split(maxsplit=1)
+        if len(parts) == 1:
+            return parts[0], ""
+        return parts[0], parts[1]
