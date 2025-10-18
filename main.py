@@ -18,6 +18,12 @@ from astrbot.api.message_components import Image, Node
 from astrbot.api.star import Context, Star, register,StarTools
 from astrbot.core.message.components import Reply
 
+try:
+    from astrbot.core.platform.sources.aiocqhttp.aiocqhttp_message_event import (
+        AiocqhttpMessageEvent,
+    )
+except Exception:  # pragma: no cover - 后备兜底，兼容非 aiocqhttp 场景
+    AiocqhttpMessageEvent = None  # type: ignore[assignment]
 
 
 SUPPORTED_EXTENSIONS: Set[str] = {".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp"}
@@ -255,20 +261,212 @@ class ImageReplayPlugin(Star):
         self, event: AstrMessageEvent
     ) -> List[Tuple[bytes, str]]:
         payloads: List[Tuple[bytes, str]] = []
-        for segment in self._gather_image_segments(event):
+        segments = self._gather_image_segments(event)
+        for segment in segments:
             loaded = await self._load_image_segment(segment)
             if loaded:
                 payloads.append(loaded)
+        if payloads:
+            return payloads
+        fallback = await self._load_reply_images_via_api(event)
+        if fallback:
+            payloads.extend(fallback)
         return payloads
 
     def _gather_image_segments(self, event: AstrMessageEvent) -> List[Image]:
+        segments: List[Image] = []
+        seen: Set[int] = set()
+
+        def collect(items: Optional[Iterable[Any]]) -> bool:
+            if not items:
+                return False
+            found = False
+            for seg in items:
+                if isinstance(seg, Image):
+                    key = id(seg)
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    segments.append(seg)
+                    found = True
+                elif isinstance(seg, Reply):
+                    chain = getattr(seg, "chain", None)
+                    if chain and collect(chain):
+                        found = True
+            return found
+
         chain = event.get_messages()
         reply_seg = next((seg for seg in chain if isinstance(seg, Reply)), None)
         if reply_seg and getattr(reply_seg, "chain", None):
-            reply_images = [seg for seg in reply_seg.chain if isinstance(seg, Image)]
-            if reply_images:
-                return reply_images
-        return [seg for seg in chain if isinstance(seg, Image)]
+            if collect(reply_seg.chain):
+                return segments
+
+        if collect(chain):
+            return segments
+
+        message_obj = getattr(event, "message_obj", None)
+        raw_message = getattr(message_obj, "message", None)
+        if isinstance(raw_message, (list, tuple)):
+            collect(raw_message)
+        return segments
+
+    async def _load_reply_images_via_api(
+        self, event: AstrMessageEvent
+    ) -> List[Tuple[bytes, str]]:
+        if AiocqhttpMessageEvent is None or not isinstance(
+            event, AiocqhttpMessageEvent  # type: ignore[arg-type]
+        ):
+            return []
+        message_id = self._extract_reply_message_id(event)
+        if not message_id:
+            return []
+        client = getattr(event, "bot", None)
+        if not client:
+            return []
+        try:
+            response = await client.api.call_action("get_msg", message_id=message_id)
+        except Exception as exc:
+            logger.error(f"获取引用消息失败: {exc}", exc_info=True)
+            return []
+        message_nodes = response.get("message", [])
+        if not isinstance(message_nodes, list):
+            return []
+        payloads: List[Tuple[bytes, str]] = []
+        for node in message_nodes:
+            if not isinstance(node, Mapping):
+                continue
+            node_type = node.get("type")
+            if node_type == "image":
+                data = node.get("data") or {}
+                if not isinstance(data, Mapping):
+                    continue
+                url = data.get("url")
+                if isinstance(url, str) and url:
+                    image_bytes = await self._load_image_source(url)
+                    if image_bytes:
+                        extension = await self._derive_image_extension(image_bytes, url)
+                        payloads.append((image_bytes, extension))
+                        continue
+                file_id = data.get("file")
+                if isinstance(file_id, str) and file_id:
+                    loaded = await self._load_image_by_file_id(event, file_id)
+                    if loaded:
+                        payloads.append(loaded)
+                continue
+            if node_type != "file":
+                continue
+            data = node.get("data") or {}
+            if not isinstance(data, Mapping):
+                continue
+            loaded_file = await self._load_file_node_as_image(event, data)
+            if loaded_file:
+                payloads.append(loaded_file)
+        return payloads
+
+    def _extract_reply_message_id(self, event: AstrMessageEvent) -> Optional[str]:
+        reply_seg = next(
+            (seg for seg in event.get_messages() if isinstance(seg, Reply)), None
+        )
+        if not reply_seg:
+            return None
+        message_id = getattr(reply_seg, "id", None) or getattr(
+            reply_seg, "message_id", None
+        )
+        if message_id is None:
+            return None
+        return str(message_id)
+
+    async def _load_image_by_file_id(
+        self, event: AstrMessageEvent, file_id: str
+    ) -> Optional[Tuple[bytes, str]]:
+        client = getattr(event, "bot", None)
+        if not client:
+            return None
+        try:
+            response = await client.api.call_action("get_image", file_id=file_id)
+        except Exception as exc:
+            logger.error(f"读取文件标识 {file_id} 对应图片失败: {exc}", exc_info=True)
+            return None
+        local_path = response.get("file")
+        if not isinstance(local_path, str):
+            return None
+        try:
+            file_path = Path(local_path)
+            data = file_path.read_bytes()
+        except Exception as exc:
+            logger.error(f"读取本地图片文件失败: {exc}", exc_info=True)
+            return None
+        suffix = file_path.suffix.lower()
+        if suffix not in SUPPORTED_EXTENSIONS:
+            suffix = ".jpg"
+        return data, suffix
+
+    async def _load_file_node_as_image(
+        self, event: AstrMessageEvent, file_data: Mapping[str, Any]
+    ) -> Optional[Tuple[bytes, str]]:
+        file_id = (
+            file_data.get("file")
+            or file_data.get("file_id")
+            or file_data.get("id")
+            or ""
+        )
+        if not isinstance(file_id, str) or not file_id:
+            return None
+        name = file_data.get("name") or ""
+        suffix = Path(str(name)).suffix.lower()
+        if suffix and suffix not in SUPPORTED_EXTENSIONS:
+            return None
+        client = getattr(event, "bot", None)
+        if not client:
+            return None
+        group_id = event.get_group_id()
+        download_url: Optional[str] = None
+        if group_id:
+            payload = {"group_id": group_id, "file_id": file_id}
+            busid = file_data.get("busid") or file_data.get("bus_id")
+            if busid:
+                payload["busid"] = busid
+            try:
+                response = await client.api.call_action(
+                    "get_group_file_url", **payload
+                )
+                download_url = (
+                    response.get("url")
+                    if isinstance(response, Mapping)
+                    else None
+                )
+                if not download_url and isinstance(response, Mapping):
+                    download_url = response.get("download_url") or response.get("file")
+            except Exception as exc:
+                logger.debug(f"获取群文件下载地址失败: {exc}")
+        if download_url:
+            data = await self._load_image_source(download_url)
+            if data:
+                ext = suffix if suffix in SUPPORTED_EXTENSIONS else None
+                extension = ext or await self._derive_image_extension(data, download_url)
+                return data, extension
+        try:
+            response = await client.api.call_action("get_file", file_id=file_id)
+        except Exception as exc:
+            logger.debug(f"通过 get_file 获取本地文件失败: {exc}")
+            return None
+        local_path = (
+            response.get("file")
+            if isinstance(response, Mapping)
+            else None
+        )
+        if not isinstance(local_path, str):
+            return None
+        try:
+            file_path = Path(local_path)
+            data = file_path.read_bytes()
+        except Exception as exc:
+            logger.error(f"读取群文件本地缓存失败: {exc}", exc_info=True)
+            return None
+        ext = suffix if suffix in SUPPORTED_EXTENSIONS else file_path.suffix.lower()
+        if ext not in SUPPORTED_EXTENSIONS:
+            ext = await self._derive_image_extension(data, None)
+        return data, ext
 
     async def _load_image_segment(
         self, segment: Image
@@ -281,6 +479,28 @@ class ImageReplayPlugin(Star):
             if data:
                 extension = await self._derive_image_extension(data, src)
                 return data, extension
+        converter = getattr(segment, "convert_to_base64", None)
+        if callable(converter):
+            try:
+                base64_payload = converter()
+                if asyncio.iscoroutine(base64_payload):
+                    base64_payload = await base64_payload
+                if isinstance(base64_payload, bytes):
+                    decoded = base64_payload
+                elif isinstance(base64_payload, str):
+                    payload = (
+                        base64_payload[9:]
+                        if base64_payload.startswith("base64://")
+                        else base64_payload
+                    )
+                    decoded = base64.b64decode(payload)
+                else:
+                    decoded = None
+                if decoded:
+                    extension = await self._derive_image_extension(decoded, None)
+                    return decoded, extension
+            except Exception as exc:
+                logger.warning(f"转换消息段为图片数据失败: {exc}")
         return None
 
     async def _load_image_source(self, src: str) -> Optional[bytes]:
